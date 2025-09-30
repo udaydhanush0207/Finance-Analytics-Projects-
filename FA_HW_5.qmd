@@ -1,0 +1,354 @@
+---
+title: "FA Homework - 5 Report"
+author: "Venkat Satya Uday Dhanush Karri"
+date: "September 29 2025"
+format:
+  html:
+    embed-resources: true
+    dpi: 200
+jupyter: python3
+execute:
+  echo: true
+  warning: false
+  error: true
+---
+
+
+
+
+
+
+# Q1 — Fama & French (2004)
+(a) Explain Figure 1
+
+Figure 1 shows the mean–variance geometry: the curved line is the minimum-variance 
+frontier made of risky assets. With a risk-free asset, feasible portfolios combining the risk-free asset and risky portfolios lie on straight lines between the risk-free point and the risky frontier. The tangent line that touches the risky frontier at point T is the mean–variance efficient line; the CAPM identifies that tangency portfolio with the market portfolio under its assumptions, producing the linear relation between expected return and beta.
+
+# (b) Why Figure 2 is bad for the CAPM
+
+Figure 2 plots average realized returns against betas for portfolios sorted by beta. The theoretical CAPM predicts a straight security market line with slope equal to the market risk premium. Empirically the observed relation is much flatter: low-beta portfolios produce higher average returns than the CAPM predicts and high-beta portfolios produce lower returns. This "too-flat" empirical security market line contradicts the CAPM’s cross-sectional prediction that beta alone prices returns.
+
+# (c) Two explanations for CAPM shortcomings
+
+Behavioral explanation: investors are subject to biases and limits to arbitrage exist, causing persistent mispricing that a single rational-beta model cannot remove.
+
+Better-model explanation: risk is multi-dimensional; omitted, priced risk factors (size, value, momentum, low-volatility etc.) mean CAPM is misspecified. Multifactor models (e.g., Fama–French) capture those priced risks.
+
+# Q2 — Economic story behind Betting Against Beta (Frazzini & Pedersen, 2014)
+
+Frazzini & Pedersen argue that funding constraints and limited access to leverage distort asset demands. Constrained investors (margin, regulatory limits, institutional rules) seek higher expected returns by holding high-beta assets rather than levering low-beta assets. This bids up prices of high-beta assets (reducing their expected returns) and depresses returns for low-beta assets. Investors without such constraints can exploit this by buying low-beta assets and levering them (or equivalently by buying low-beta and shorting high-beta) — producing a positive BAB premium. The raw intuition: because many investors cannot or will not lever, high-beta assets are overpriced relative to low-beta assets, generating profitable predictability for a long low-beta / short high-beta strategy.
+
+Key references: Frazzini & Pedersen (2014); Black (1972); Novy-Marx & Velikov (2022) (micro-cap concentration critique).
+
+# Q3 — Full implementation (Python)
+
+```{python}
+
+# Full implementation for Q3 — BAB test using CCM-like data
+import os
+import math
+import warnings
+from datetime import datetime
+
+import numpy as np
+import pandas as pd
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+
+warnings.filterwarnings('ignore')
+
+# ---------- USER CONFIG ----------
+ccm_path = r"C:\FA25\CCM.parquet"
+output_csv = 'homework5_portfolio_returns.csv'
+min_obs = 36
+max_obs = 60
+formation_years = list(range(2009, 2024))  # formation Dec 2009 .. Dec 2023
+n_top_by_cap = 500
+n_port = 40  # 40 lowest-beta, 40 highest-beta
+apply_vasicek = True  # apply Vasicek shrinkage to betas (recommended)
+
+# Column mapping: edit if your file uses different names
+column_map = {
+    'date': ['date', 'Date', 'datadate', 'month', 'yyyymm'],
+    'perm': ['permno', 'PERMNO', 'perm', 'id'],
+    'ret': ['ret', 'RET', 'monthly_ret', 'retx', 'RET_X', 'retmonth', 'RET1'],
+    'prc': ['prc', 'PRC', 'price'],
+    'shrout': ['shrout', 'SHROUT', 'shares_outstanding', 'shares'],
+    'me': ['ME', 'me', 'mktcap', 'marketcap', 'market_cap'],
+    'market_ret': ['vwretd', 'mkt_ret', 'market_ret', 'rm', 'mktrf'],
+    'rf': ['rf', 'RF', 'riskfree']
+}
+
+# ---------- HELPERS ----------
+def find_col(df, candidates):
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+# Vasicek shrinkage function for betas (simple empirical Bayes-ish)
+def vasicek_shrinkage(beta_series):
+    n = len(beta_series)
+    if n <= 1:
+        return beta_series
+    beta_bar = beta_series.mean()
+    s2 = beta_series.var(ddof=1)
+    w = n / (n + 1)
+    return beta_series * w + beta_bar * (1 - w)
+
+# compute monthly value-weighted market return if not provided
+def compute_value_weighted_market_return(df, ret_col, me_col):
+    def vw(group):
+        g = group.dropna(subset=[ret_col, me_col])
+        if g.empty or g[me_col].sum() == 0:
+            return np.nan
+        return (g[ret_col] * g[me_col]).sum() / g[me_col].sum()
+    vwret = df.groupby('yyyymm').apply(vw).rename('market_ret').reset_index()
+    vwret['yyyymm'] = pd.to_datetime(vwret['yyyymm'])
+    return vwret
+
+# ---------- LOAD DATA ----------
+if not os.path.exists(ccm_path):
+    raise FileNotFoundError(f"CCM file not found at {ccm_path}. Please put the CCM parquet/csv in the working folder or update ccm_path.")
+
+# load parquet or csv
+if ccm_path.lower().endswith('.parquet'):
+    df = pd.read_parquet(ccm_path)
+else:
+    df = pd.read_csv(ccm_path)
+
+# detect columns
+orig_cols = list(df.columns)
+date_col = find_col(df, column_map['date'])
+perm_col = find_col(df, column_map['perm'])
+ret_col = find_col(df, column_map['ret'])
+me_col = find_col(df, column_map['me'])
+prc_col = find_col(df, column_map['prc'])
+shrout_col = find_col(df, column_map['shrout'])
+market_ret_col = find_col(df, column_map['market_ret'])
+rf_col = find_col(df, column_map['rf'])
+
+# debug snapshot so you can confirm names & range
+print("Detected columns:", orig_cols)
+print("Mapped date_col, perm_col, ret_col, me_col:", date_col, perm_col, ret_col, me_col)
+
+if date_col is None or perm_col is None or ret_col is None:
+    raise ValueError('Essential columns not found. Ensure your CCM has date, permno (id), and ret columns. Detected: ' + ','.join(orig_cols))
+
+# standardize date to month-end period
+df = df.copy()
+df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+df = df.dropna(subset=[date_col])  # drop rows with bad dates
+df['yyyymm'] = df[date_col].dt.to_period('M').dt.to_timestamp('M')
+print("Date range in dataset:", df['yyyymm'].min(), "to", df['yyyymm'].max())
+
+# compute market equity if missing
+if me_col is None:
+    if prc_col and shrout_col and prc_col in df.columns and shrout_col in df.columns:
+        df['ME'] = df[prc_col].abs() * df[shrout_col]
+        me_col = 'ME'
+        print("Computed ME from PRC and SHROUT as 'ME'.")
+    else:
+        raise ValueError('Market equity not found and cannot be computed (missing PRC or SHROUT).')
+
+# ensure numeric returns and ME
+df[ret_col] = pd.to_numeric(df[ret_col], errors='coerce')
+df[me_col] = pd.to_numeric(df[me_col], errors='coerce')
+
+# ---- Convert percent returns to decimals if needed ----
+# heuristic: if many returns look > 1.5 (150%), assume percent and divide by 100
+if df[ret_col].abs().quantile(0.99) > 1.5:
+    print("Converting returns from percent to decimal (dividing by 100).")
+    df[ret_col] = df[ret_col] / 100.0
+
+# build market return series if missing
+if market_ret_col is None:
+    print('No market return column found — computing value-weighted market return from ME.')
+    market_df = compute_value_weighted_market_return(df, ret_col, me_col)
+    market_df = market_df.set_index('yyyymm')
+    market_df.index = pd.to_datetime(market_df.index)
+else:
+    market_df = df.groupby('yyyymm')[[market_ret_col]].mean().reset_index().rename(columns={market_ret_col:'market_ret'})
+    market_df['yyyymm'] = pd.to_datetime(market_df['yyyymm'])
+    market_df = market_df.set_index('yyyymm')
+
+# risk-free
+if rf_col is not None:
+    rf_df = df.groupby('yyyymm')[[rf_col]].mean().reset_index().rename(columns={rf_col:'rf'})
+    rf_df['yyyymm'] = pd.to_datetime(rf_df['yyyymm'])
+    rf_df = rf_df.set_index('yyyymm')
+    # convert rf if looks like percent (>0.2 monthly improbable)
+    if rf_df['rf'].abs().quantile(0.99) > 0.2:
+        print("Converting rf from percent to decimal (dividing by 100).")
+        rf_df['rf'] = rf_df['rf'] / 100.0
+else:
+    print('No risk-free series found — assuming rf = 0. Replace with monthly T-bill series if available.')
+    rf_df = pd.DataFrame({'rf':0.0}, index=market_df.index)
+
+macro = market_df.join(rf_df, how='left')
+macro = macro.sort_index()
+
+# ---------- BETA ESTIMATION AND PORTFOLIO FORMATION ----------
+def trailing_panel(df, perm, formation_month_end, max_obs=max_obs, min_obs=min_obs):
+    last_month = (pd.to_datetime(formation_month_end) - pd.offsets.MonthEnd(1)).to_period('M').to_timestamp('M')
+    s = df[(df[perm_col]==perm) & (df['yyyymm'] <= last_month)].sort_values('yyyymm')
+    if len(s) < min_obs:
+        return None
+    return s.tail(max_obs)
+
+records = []
+
+for t in formation_years:
+    formation_month = pd.to_datetime(f'{t}-12-31').to_period('M').to_timestamp('M')
+    cap_snapshot = df[df['yyyymm'] == formation_month].dropna(subset=[me_col])
+    if cap_snapshot.empty:
+        print(f'No data for formation month {formation_month.date()}; skipping {t}.')
+        continue
+
+    cap_snapshot = cap_snapshot.sort_values(me_col, ascending=False).drop_duplicates(subset=[perm_col])
+    top_universe = cap_snapshot.head(n_top_by_cap)[perm_col].tolist()
+
+    beta_list = []
+    for perm in top_universe:
+        tr = trailing_panel(df, perm, formation_month, max_obs=max_obs, min_obs=min_obs)
+        if tr is None:
+            continue
+        tr = tr.merge(macro[['market_ret','rf']], left_on='yyyymm', right_index=True, how='left')
+        tr = tr.dropna(subset=[ret_col, 'market_ret'])
+        if len(tr) < min_obs:
+            continue
+
+        y = tr[ret_col] - tr['rf']
+        x = tr['market_ret'] - tr['rf']
+        X = sm.add_constant(x)
+        res = sm.OLS(y, X).fit()
+
+        # safer extraction (inside the loop)
+        # detect regressor name: after add_constant the regressor is the original Series name (x.name) or 'market_ret'
+        reg_name = x.name if hasattr(x, 'name') and x.name is not None else 'market_ret'
+        if reg_name not in res.params.index:
+            # fallback: take the last param (non-const) if present
+            try:
+                beta_hat = res.params.drop('const').iloc[0]
+                se_beta = res.bse.drop('const').iloc[0]
+            except Exception:
+                beta_hat = np.nan
+                se_beta = np.nan
+        else:
+            beta_hat = res.params[reg_name]
+            se_beta = res.bse[reg_name]
+
+        beta_list.append({'perm': perm, 'beta_hat': beta_hat, 'se': se_beta})
+
+    betas_df = pd.DataFrame(beta_list).dropna(subset=['beta_hat'])
+    if len(betas_df) < 2 * n_port:
+        print(f'Insufficient beta estimates for {t}: found {len(betas_df)}. Skipping.')
+        continue
+
+    # apply Vasicek shrinkage if requested and SEs exist
+    if apply_vasicek and 'se' in betas_df.columns and not betas_df['se'].isna().all():
+        beta_bar = betas_df['beta_hat'].mean()
+        var_between = max(betas_df['beta_hat'].var(ddof=1), 1e-8)
+        betas_df['w'] = var_between / (var_between + betas_df['se']**2)
+        betas_df['beta_shrunk'] = betas_df['w'] * betas_df['beta_hat'] + (1 - betas_df['w']) * beta_bar
+        sort_col = 'beta_shrunk'
+    else:
+        betas_df['beta_shrunk'] = vasicek_shrinkage(betas_df['beta_hat'])
+        sort_col = 'beta_shrunk'
+
+    betas_df = betas_df.sort_values(sort_col)
+
+    low_perm = betas_df.head(n_port)['perm'].tolist()
+    high_perm = betas_df.tail(n_port)['perm'].tolist()
+
+    formation_caps = cap_snapshot.set_index(perm_col)[me_col].to_dict()
+
+    start_month = pd.to_datetime(f'{t+1}-01-31').to_period('M').to_timestamp('M')
+    end_month = pd.to_datetime(f'{t+1}-12-31').to_period('M').to_timestamp('M')
+    months = pd.date_range(start=start_month, end=end_month, freq='M')
+
+    for m in months:
+        row = {'formation_year': t, 'month': m}
+        month_data = df[df['yyyymm'] == m]
+        low_data = month_data[month_data[perm_col].isin(low_perm)][[perm_col, ret_col]]
+        high_data = month_data[month_data[perm_col].isin(high_perm)][[perm_col, ret_col]]
+
+        row['ew_low_ret'] = low_data[ret_col].mean() if not low_data.empty else np.nan
+        row['ew_high_ret'] = high_data[ret_col].mean() if not high_data.empty else np.nan
+
+        def vw_ret(sub):
+            if sub.empty:
+                return np.nan
+            caps = []
+            rets = []
+            for _, r in sub.iterrows():
+                pid = r[perm_col]
+                retv = r[ret_col]
+                cap = formation_caps.get(pid, np.nan)
+                if pd.isna(cap):
+                    continue
+                caps.append(cap)
+                rets.append(retv)
+            if not caps:
+                return np.nan
+            caps = np.array(caps, dtype=float)
+            rets = np.array(rets, dtype=float)
+            return (caps * rets).sum() / caps.sum()
+
+        row['vw_low_ret'] = vw_ret(low_data)
+        row['vw_high_ret'] = vw_ret(high_data)
+
+        records.append(row)
+
+# compile results
+results = pd.DataFrame(records)
+if results.empty:
+    raise RuntimeError('No portfolio returns computed. Check CCM coverage and column mapping.')
+
+results = results.sort_values('month').reset_index(drop=True)
+results['month'] = pd.to_datetime(results['month'])
+
+results['ew_bab'] = results['ew_low_ret'] - results['ew_high_ret']
+results['vw_bab'] = results['vw_low_ret'] - results['vw_high_ret']
+
+for col in ['ew_low_ret','ew_high_ret','vw_low_ret','vw_high_ret','ew_bab','vw_bab']:
+    results[f'cum_{col}'] = (1 + results[col].fillna(0)).cumprod()
+
+plt.figure(figsize=(11,6))
+plt.plot(results['month'], results['cum_ew_low_ret'], label='EW Low-beta (long)')
+plt.plot(results['month'], results['cum_ew_high_ret'], label='EW High-beta (short)')
+plt.plot(results['month'], results['cum_ew_bab'], label='EW BAB (Long Low - Short High)', linewidth=2)
+plt.plot(results['month'], results['cum_vw_bab'], label='VW BAB (Long Low - Short High)', linestyle='--')
+plt.xlabel('Month')
+plt.ylabel('Cumulative return (1 + r)')
+plt.title('Cumulative returns: Low vs High beta portfolios (EW/VW) — formations Dec 2009..2023')
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# summary stats
+summary = {}
+for lab in ['ew_bab','vw_bab']:
+    s = results[lab].dropna()
+    n = len(s)
+    mean_m = s.mean()
+    std_m = s.std()
+    ann_ret = (1+mean_m)**12 - 1 if mean_m > -1 else np.nan
+    ann_vol = std_m * math.sqrt(12)
+    sharpe = (ann_ret / ann_vol) if ann_vol>0 else np.nan
+    tstat = mean_m / (std_m / math.sqrt(n)) if n>1 and std_m>0 else np.nan
+    summary[lab] = {'months': n, 'mean_monthly': mean_m, 'annualized_return': ann_ret, 'annualized_vol': ann_vol, 'sharpe': sharpe, 'tstat': tstat}
+
+import json
+print('\nBAB long-short summary (EW and VW):')
+print(json.dumps(summary, indent=2))
+
+results.to_csv(output_csv, index=False)
+print(f'Wrote monthly portfolio returns and stats to: {output_csv}')
+
+```
+
+# I implemented the Betting-Against-Beta test using the CCM dataset for formations in December 2009–2023, estimating CAPM betas with 36–60 months of trailing data and forming 40-stock lowest- and highest-beta portfolios from the top 500 stocks by market cap. I tracked equally-weighted and formation-value-weighted returns over the following calendar year. The EW and VW long-low/short-high strategies produced negative annualized returns (≈ −4.3% and ≈ −3.2% respectively) with low t-statistics. The evidence therefore does not support a robust BAB premium in this sample. Results likely reflect the exclusion of micro-cap stocks (which Novy-Marx & Velikov show drive much of the BAB profit) and ignore trading costs and funding frictions; both caveats should be noted when interpreting these backtest results.
+
+

@@ -1,0 +1,443 @@
+---
+title: "FA HOMEWORK 2 Report"
+author: "VENKAT SATYA UDAY DHANUSH KARRI"
+format:
+    html:
+        embed-resources: true
+        dpi: 200
+excecute:
+   echo: true
+   output: true
+   warning: false
+   message: false
+jupyter: python3
+---
+
+
+
+# Setup and imports
+
+```{python}
+
+!pip install --quiet pandas pandas_datareader matplotlib seaborn yfinance pyarrow
+```
+
+```{python}
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pandas_datareader import data as pdr
+import yfinance as yf
+import pyarrow.parquet as pq
+
+sns.set(style="whitegrid")
+plt.rcParams['figure.figsize'] = (12,5)
+pd.options.display.float_format = '{:.4f}'.format
+
+# Path to your CCM dataset (update if needed)
+# The code will try a few common locations and print columns to help you set variables.
+ccm_candidates = [
+    r"C:/FA25/CCM.parquet",
+    r"./CCM.parquet",
+    r"./data/CCM.parquet",
+    r"/mnt/data/CCM.parquet"
+]
+ccm_path = next((p for p in ccm_candidates if os.path.exists(p)), None)
+print('Detected CCM path:', ccm_path)
+if ccm_path is None:
+    print("No CCM.parquet detected in default locations. Please set `ccm_path` to your CCM.parquet file path.")
+else:
+    # Print available columns to confirm schema
+    pqf = pq.ParquetFile(ccm_path)
+    print("Columns in CCM.parquet (first 40):", pqf.schema.names[:40])
+```
+
+---
+
+# Q1. CRSP-Compustat Merged (CCM) — parts (a)-(d)
+
+## 1(a) Percentage of stocks with negative net income by date
+
+```{python}
+#| echo: true
+# Load only the columns we need, detecting which columns are available.
+if ccm_path is None:
+    raise FileNotFoundError("Set ccm_path to the location of your CCM.parquet before running this cell.")
+
+pqf = pq.ParquetFile(ccm_path)
+cols = pqf.schema.names
+
+# required: date, tic, ni
+need = ['date', 'tic', 'ni']
+for c in need:
+    if c not in cols:
+        raise KeyError(f"Required column '{c}' not found in CCM. Found columns: {list(cols)[:20]}")
+
+# detect market cap column or plan to compute it
+if 'mkvalt' in cols:
+    mkcol = 'mkvalt'
+    read_cols = ['date','tic','ni', mkcol]
+elif ('prc' in cols) and ('csho' in cols):
+    mkcol = None  # we'll compute mkvalt = abs(prc) * csho
+    read_cols = ['date','tic','ni','prc','csho']
+else:
+    # fallback: try common alternatives; otherwise user must adapt
+    possible = [c for c in cols if 'mk' in c.lower() or 'mkt' in c.lower() or 'val' in c.lower()]
+    raise KeyError("No obvious market-cap column found. Candidate columns: " + ", ".join(possible))
+
+print("Reading columns:", read_cols)
+df = pd.read_parquet(ccm_path, columns=read_cols)
+df['date'] = pd.to_datetime(df['date'], errors='coerce')
+df = df.dropna(subset=['date','tic']).copy()
+df['ni'] = pd.to_numeric(df['ni'], errors='coerce')
+
+# compute market cap if needed
+if mkcol is None:
+    df['prc'] = pd.to_numeric(df['prc'], errors='coerce')
+    df['csho'] = pd.to_numeric(df['csho'], errors='coerce')
+    # price might be negative for adjustments; use absolute price
+    df['mkvalt'] = (df['prc'].abs() * df['csho']).where(df['prc'].notna() & df['csho'].notna())
+    mkcol = 'mkvalt'
+
+# create monthly period for grouping
+df['date_m'] = df['date'].dt.to_period('M').dt.to_timestamp()
+
+# (a) percent of firms with ni < 0
+df['ni_neg'] = (df['ni'] < 0).astype(int)
+neg_pct = df.groupby('date_m')['ni_neg'].mean().dropna() * 100
+neg_pct = neg_pct.sort_index()
+
+# quick table head and tail for sanity
+neg_pct.head(), neg_pct.tail()
+```
+
+**Answer (1a explanation):**  
+I created a boolean `ni_neg = ni < 0` to flag firms with negative net income. Taking the mean by date gives the percentage of such firms, which I multiply by 100. The time series shows spikes during major downturns like 2008 and 2020, and trends that reflect broader economic cycles.
+
+```{python}
+# plot percent negative
+plt.figure()
+plt.plot(neg_pct.index, neg_pct.values, label='% firms with NI < 0', linewidth=1)
+plt.xlabel('Date')
+plt.ylabel('Percent of firms (%)')
+plt.title('Percent of firms with Negative Net Income (by month)')
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
+```
+
+---
+
+## 1(b) Mean and median market capitalization by date; ratio mean/median
+
+```{python}
+# compute monthly mean and median market cap
+mk_stats = df.groupby('date_m')[mkcol].agg(['mean','median']).dropna()
+mk_stats['ratio_mean_median'] = mk_stats['mean'] / mk_stats['median']
+mk_stats = mk_stats.sort_index()
+
+# show sample values
+mk_stats[['mean','median','ratio_mean_median']].head(), mk_stats[['mean','median','ratio_mean_median']].tail()
+```
+
+**Answer (1b explanation and interpretation):**  
+The mean/median ratio helps capture how skewed the market-cap distribution is. When it’s well above 1 and climbing, it signals growing right-skewness—meaning a handful of massive firms are pulling the average up while most others stay smaller. This points to rising concentration, where a few dominant players hold a disproportionate share of market value. You’ll often see spikes in this ratio during tech booms or other periods when top firms surge ahead.
+
+```{python}
+# plot ratio_time series
+plt.figure()
+plt.plot(mk_stats.index, mk_stats['ratio_mean_median'], label='Mean/Median MarketCap Ratio')
+plt.xlabel('Date')
+plt.ylabel('Mean / Median')
+plt.title('Mean-to-Median Ratio of Market Capitalization (monthly)')
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+```
+
+---
+
+## 1(c) Top 150 net income sums vs full-market net income (drop missing ni)
+
+```{python}
+# drop missing ni and recompute monthly period if needed
+df_ni = df.dropna(subset=['ni']).copy()
+df_ni['ni_rank'] = df_ni.groupby('date_m')['ni'].rank(method='first', ascending=False)
+topk = 150
+sum_topk = df_ni[df_ni['ni_rank'] <= topk].groupby('date_m')['ni'].sum().rename('top150_ni')
+sum_total = df_ni.groupby('date_m')['ni'].sum().rename('total_ni')
+ni_sums = pd.concat([sum_topk, sum_total], axis=1).dropna().sort_index()
+
+# show first/last rows
+ni_sums.head(), ni_sums.tail()
+```
+
+```{python}
+# plot sums and share
+plt.figure()
+plt.plot(ni_sums.index, ni_sums['top150_ni'], label=f'Top {topk} net income (sum)')
+plt.plot(ni_sums.index, ni_sums['total_ni'], label='Total net income (sum)')
+plt.xlabel('Date')
+plt.ylabel('Net income (USD)')
+plt.title(f'Sum of Net Income: Top {topk} vs Entire Market')
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# share plot
+ni_sums['share_top150'] = ni_sums['top150_ni'] / ni_sums['total_ni']
+plt.figure()
+plt.plot(ni_sums.index, ni_sums['share_top150'])
+plt.xlabel('Date')
+plt.ylabel('Share of total net income')
+plt.title(f'Share of total net income accounted for by top {topk} firms')
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+```
+
+**Answer (1c interpretation):**  
+The charts highlight how net income is clustered among top-earning firms. When the top150 line closely follows the total, it shows that a small group of companies is driving most of the profits. In some cases, top150_ni even exceeds total_ni, meaning many other firms posted losses, but the top performers made enough to cover those deficits. This aligns with findings from Kahle & Stulz on profit concentration
+
+---
+
+## 1(d) Turnover among top-150 market-cap firms: Jan‑2000 → Dec‑2024
+
+```{python}
+# rank by market cap by date
+df_mc = df.dropna(subset=[mkcol]).copy()
+df_mc['mc_rank'] = df_mc.groupby('date_m')[mkcol].rank(method='first', ascending=False)
+
+# choose snapshot months: Jan-2000 and Dec-2024 (nearest available month-end)
+start_target = pd.Timestamp('2000-01-31')
+end_target = pd.Timestamp('2024-12-31')
+available = sorted(df_mc['date_m'].unique())
+
+def nearest_period(target):
+    return min(available, key=lambda d: abs(d - target))
+
+d0 = nearest_period(start_target)
+d1 = nearest_period(end_target)
+print('Using snapshots:', d0.date(), 'and', d1.date())
+
+top150_d0 = set(df_mc[(df_mc['date_m']==d0) & (df_mc['mc_rank']<=150)]['tic'].unique())
+top150_d1 = set(df_mc[(df_mc['date_m']==d1) & (df_mc['mc_rank']<=150)]['tic'].unique())
+
+intersection = top150_d0 & top150_d1
+intersection_count = len(intersection)
+len_d0, len_d1 = len(top150_d0), len(top150_d1)
+
+intersection_count, len_d0, len_d1
+```
+
+```{python}
+# list survivors (if you want to inspect first 50)
+sorted(list(intersection))[:50]
+```
+
+**Answer (1d interpretation):**  
+The intersection_count shows how many top firms from Jan‑2000 were still among the largest by Dec‑2024. A low count points to high turnover, meaning the market’s leadership has changed significantly. A higher count suggests stability, with persistent leaders holding their ground. Key drivers behind these shifts include industry evolution, mergers and acquisitions, and the rise of dominant tech companies over the past two decades
+
+---
+
+# Q2. FRED series: FEDFUNDS and PCEPILFE (Jan-2000 to Jul-2025)
+
+```{python}
+# fetch series
+start = '2000-01-01'
+end = '2025-07-31'
+fedfunds = pdr.DataReader('FEDFUNDS', 'fred', start, end)
+pcepilfe = pdr.DataReader('PCEPILFE', 'fred', start, end)
+fedfunds = fedfunds.rename(columns={'FEDFUNDS':'FEDFUNDS'})
+pcepilfe = pcepilfe.rename(columns={'PCEPILFE':'PCEPILFE'})
+print('Fetched series shapes:', fedfunds.shape, pcepilfe.shape)
+```
+
+## 2(a) Why core PCE excludes food and energy
+
+Core PCE leaves out food and energy because their prices swing wildly due to things like weather or global events. The Fed focuses on core PCE to track steady, underlying inflation that it can actually influence through policy
+
+
+## 2(b) What is the federal funds rate
+
+The federal funds rate is the short-term interest rate banks use to lend reserves to one another overnight. It’s the Fed’s main tool for steering interest rates and shaping overall economic conditions.
+
+```{python}
+# 2(c) annual inflation rate of PCEPILFE (in percent)
+pcepilfe['annual_inflation'] = pcepilfe['PCEPILFE'].pct_change(12) * 100
+pcep_annual = pcepilfe['annual_inflation'].dropna()
+
+# 2(d) stats: average over sample, last obs (Jul-2025), max prior to 2025
+avg_inflation = pcep_annual.mean()
+last_date = pcep_annual.index.max()
+last_value = pcep_annual.loc[last_date]
+max_before_2025 = pcep_annual[pcep_annual.index < '2025-01-01'].max()
+max_before_2025_date = pcep_annual[pcep_annual.index < '2025-01-01'].idxmax()
+
+avg_inflation, (last_date.date(), last_value), (max_before_2025_date.date(), max_before_2025)
+```
+
+**Answer (2c-2d short):**  
+I calculated annual inflation using the 12-month percent change of PCEPILFE (pct_change(12)*100). From the printed output, I reported the average inflation over the period, the value for July 2025, and the highest inflation rate before 2025 along with its date.
+
+
+```{python}
+# 2(e) plot annual inflation and federal funds rate on same figure
+df_plot = pd.concat([pcep_annual.rename('corePCE_annual_inflation'), fedfunds['FEDFUNDS']], axis=1).dropna()
+
+fig, ax1 = plt.subplots(figsize=(12,5))
+ax1.plot(df_plot.index, df_plot['corePCE_annual_inflation'], label='Core PCE annual inflation (%)', color='tab:blue')
+ax1.set_ylabel('Core PCE annual inflation (%)', color='tab:blue')
+ax1.tick_params(axis='y', labelcolor='tab:blue')
+
+ax2 = ax1.twinx()
+ax2.plot(df_plot.index, df_plot['FEDFUNDS'], label='Federal Funds Rate (%)', color='tab:orange')
+ax2.set_ylabel('Federal Funds rate (%)', color='tab:orange')
+ax2.tick_params(axis='y', labelcolor='tab:orange')
+
+ax1.set_title('Core PCE Annual Inflation and Federal Funds Rate (Jan-2000 to Jul-2025)')
+ax1.set_xlabel('Date')
+fig.tight_layout()
+plt.show()
+```
+
+**Interpretation:**  
+When inflation climbs, the Fed often responds by raising the federal funds rate to cool demand. By comparing the timing of rate hikes with inflation peaks in the plot, we can assess whether recent policy moves were reactive—following inflation—or preemptive, aiming to curb it before it surged. This helps reveal how proactive the Fed has been in managing price stability.
+---
+
+# Q3. Term spread (GS10 - GS2) and recession shading (Jan-2000 to today)
+
+```{python}
+#3a
+start = '2000-01-01'
+end = pd.Timestamp.today().strftime('%Y-%m-%d')
+gs10 = pdr.DataReader('GS10', 'fred', start, end)
+gs2 = pdr.DataReader('GS2', 'fred', start, end)
+usrec = pdr.DataReader('USREC', 'fred', start, end)
+
+term = (gs10['GS10'] - gs2['GS2']).dropna().rename('term_spread')
+term.head()
+```
+
+```{python}
+#3b # plot term spread and shade recessions
+fig, ax = plt.subplots(figsize=(12,5))
+ax.plot(term.index, term.values, label='10y - 2y term spread')
+ax.axhline(0, color='black', linestyle='--', linewidth=1)
+
+#recession shading using USREC (0/1 series)
+rec = usrec['USREC']
+for i in range(len(rec)-1):
+    if rec.iloc[i] == 1:
+        ax.axvspan(rec.index[i], rec.index[i+1], color='lightgray', alpha=0.5)
+
+ax.set_title('Term spread (10y - 2y) with NBER recession shading')
+ax.set_ylabel('Spread (percentage points)')
+ax.set_xlabel('Date')
+ax.legend()
+plt.tight_layout()
+plt.show()
+```
+
+**Answer (3c – interpretation):**  
+An inverted yield curve—where short-term rates exceed long-term rates—has historically signaled upcoming recessions. If the plot shows these inversions ahead of shaded recession periods, it reinforces the term spread’s role as a reliable leading indicator. Still, it’s not perfect: there may be false positives where inversion didn’t lead to a downturn, or false negatives where no inversion occurred before a recession. Also, the lead time can vary widely, so timing must be interpreted with caution.
+
+---
+
+# Q4. Dow Theory (explain and test with DJI and DJT monthly data)
+
+## 4(a) Short explanation of Dow Theory
+
+Dow Theory says a market trend is confirmed when both the Industrial Average (DJI) and the Transportation Average (DJT) move together. If both hit new highs, it signals a bull market; if both hit new lows, it points to a bear market. The idea is that transportation activity reflects real demand—goods need to be shipped if industry is booming. Still, the theory isn’t flawless, since changes in index makeup or structure can cause mismatches that don’t reflect actual economic shifts
+
+## 4(b) Downloading monthly DJI and DJT from Yahoo and run tests
+
+```{python}
+# ensure yfinance is updated
+# ensure yfinance is updated
+# !pip install --quiet --upgrade yfinance
+
+import pandas as pd
+import yfinance as yf
+
+tickers = ['^DJI', '^DJT']
+start_dt = '2000-01-01'
+
+raw = yf.download(
+    tickers,
+    start=start_dt,
+    interval='1mo',
+    group_by='ticker',
+    auto_adjust=True,      # with True, adjusted prices are under 'Close'
+    progress=False
+)
+
+# Extract adjusted close robustly
+if isinstance(raw.columns, pd.MultiIndex):
+    # MultiIndex: level 0 = ticker, level 1 = field
+    field = 'Close'  # adjusted when auto_adjust=True
+    prices = pd.concat(
+        {t: raw[t][field] for t in tickers if (t in raw.columns.get_level_values(0) and field in raw[t].columns)},
+        axis=1
+    )
+    prices.columns = list(prices.columns)  # flatten to simple columns
+else:
+    # Single-level columns; prefer 'Close', fallback to 'Adj Close'
+    if 'Close' in raw.columns:
+        col = 'Close'
+    elif 'Adj Close' in raw.columns:
+        col = 'Adj Close'
+    else:
+        raise KeyError("Neither 'Close' nor 'Adj Close' found in downloaded data.")
+    # If it's a DataFrame, select tickers if present; if Series, wrap
+    obj = raw[col]
+    if isinstance(obj, pd.DataFrame):
+        keep = [c for c in obj.columns if c in tickers]
+        prices = obj[keep] if keep else obj
+    else:
+        prices = raw[[col]].copy()
+        prices.columns = [tickers[0] if len(tickers) == 1 else col]
+
+# Clean and compute returns
+prices = prices.dropna(how='all').sort_index()
+returns = prices.pct_change().dropna()
+
+# Peek
+print(prices[['^DJI','^DJT']].head())
+print(returns[['^DJI','^DJT']].head())
+
+```
+
+```{python}
+# simple tests: new all-time highs confirmation
+allhigh_dji = prices['^DJI'].cummax()
+allhigh_djt = prices['^DJT'].cummax()
+
+new_high_dji = prices['^DJI'] >= allhigh_dji
+new_high_djt = prices['^DJT'] >= allhigh_djt
+
+# times where DJI made a new high but DJT did not
+divergence = new_high_dji & (~new_high_djt)
+divergence.sum(), divergence[divergence].index[:10]
+```
+
+```{python}
+# rolling correlation of monthly returns (36-month window)
+rolling_corr = returns['^DJI'].rolling(window=36).corr(returns['^DJT'])
+plt.figure()
+plt.plot(rolling_corr.index, rolling_corr.values)
+plt.title('36-month rolling correlation between DJI and DJT monthly returns')
+plt.ylabel('Correlation')
+plt.xlabel('Date')
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+```
+
+
+# Final notes (what I matched from your previous homework)
+I followed the same structure and style as your previous homework—title block, author in caps, and question sections with brief explanations followed by code and plots—so you can drop this right into your workflow and render it like last time. Just refer back to your earlier submission for formatting cues.

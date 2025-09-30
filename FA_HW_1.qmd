@@ -1,0 +1,189 @@
+---
+title: "FA HOMEWORK 1 Report"
+author: "VENKAT SATYA UDAY DHANUSH KARRI"
+format:
+  html:
+    embed-resources: true
+    dpi: 200
+execute: 
+  echo: true
+  output: true
+  warning: false
+  message: false
+jupyter: python3
+---
+
+# Q1. Main takeaway from Kahle & Stulz
+
+Public corporations in the U.S. haven’t disappeared, but they don’t look like they used to. There are fewer of them, and the ones that remain are generally older and much larger. Smaller firms rarely go public anymore, with many either merging or staying private. Investment has tilted away from traditional capex toward R&D, while cash balances have grown and profits are concentrated among a handful of big players. **Overall profitability is lower on average**, yet the largest firms remain strong. What this really shows is not a collapse, but a **shift: today’s public corporation is more mature, more selective, and more concentrated** than in the past.
+
+---
+
+# Q2. Time series of unique tickers per day
+
+
+```{python}
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Loading my merged CCM dataset
+file_path = r"C:/FA25/CCM.parquet"
+df = pd.read_parquet(file_path, engine="pyarrow", columns=["date","tic"])
+
+# Cleaning 
+df["date"] = pd.to_datetime(df["date"], errors="coerce")
+df = df.dropna(subset=["date","tic"])
+df["tic"] = df["tic"].astype(str).str.strip()
+
+# Counting the unique tickers per date
+counts_daily = (
+    df.groupby(df["date"].dt.normalize())["tic"]
+      .nunique()
+      .reset_index(name="unique_tickers")
+      .sort_values("date")
+)
+
+# Plotting out the Unique tickers 
+plt.figure(figsize=(10,5))
+plt.plot(counts_daily["date"], counts_daily["unique_tickers"])
+plt.xlabel("Date")
+plt.ylabel("Number of unique tickers")
+plt.title("Number of Unique Stocks in CRSP-Compustat (2007–present)")
+plt.grid(True)
+plt.xticks(rotation=15)
+plt.tight_layout()
+plt.show()
+
+```
+
+# Q3. University of Michigan Consumer Sentiment Index
+
+## (a) How is it constructed?
+
+The University of Michigan Consumer Sentiment Index is based on a monthly survey of U.S. households. Respondents are asked about their personal finances, expectations for the economy, and buying conditions for big-ticket items. Answers are aggregated into a single index of consumer attitudes toward current and future economic conditions.
+
+---
+
+## (b) Plot the Consumer Sentiment Index with Recession Shadings
+
+```{python}
+import pandas as pd
+import matplotlib.pyplot as plt
+from pandas_datareader import data as pdr
+
+# Pulling the data from FRED using pandas_datareader
+start = "2000-01-01"
+umcsent = pdr.DataReader("UMCSENT", "fred", start)
+
+# Also getting US recession indicator (NBER) from FRED
+recession = pdr.DataReader("USREC", "fred", start)
+
+# Merge
+df_fred = umcsent.join(recession, how="outer").dropna()
+
+# Plotting with recession shading
+plt.figure(figsize=(10,5))
+plt.plot(df_fred.index, df_fred["UMCSENT"], label="UM Consumer Sentiment", color="blue")
+
+# Shade recessions
+for i in range(len(df_fred)-1):
+    if df_fred["USREC"].iloc[i] == 1:
+        plt.axvspan(df_fred.index[i], df_fred.index[i+1], color="gray", alpha=0.3)
+
+plt.title("University of Michigan Consumer Sentiment Index (2000–present)")
+plt.xlabel("Year")
+plt.ylabel("Index")
+plt.legend()
+plt.grid(True)
+plt.show()
+```
+
+## (b) Comment : Does it increase during expansions?
+
+The index **rises during expansions and falls sharply during contractions** (e.g., 2008, 2020). Because it often turns before or at the same time as the economy, it is usually considered a leading indicator of consumer spending and broader activity.
+For example, stock prices, consumer confidence, or building permits often climb before or during a boom.
+
+## Does it decrease during contractions? 
+If the series drops before or during a slowdown, it could be signaling trouble.
+
+## Is the movement delayed? 
+Some things, like unemployment, often peak after a recession is already over. That would be lagging.
+
+## Now, on the classification side:
+
+A **leading indicator** turns up or down before the overall economy does (examples: stock market returns, new orders, building permits).
+
+A **coincident indicator** moves at the same time as the economy (examples: GDP, industrial production, personal income).
+
+A **lagging indicator** shifts after the economy has already moved (examples: unemployment rate, CPI inflation, outstanding loans).
+
+# Q4. Average Hourly Earnings & CPI Inflation
+
+## (a) Compute annual growth and plot
+
+```{python}
+import pandas as pd
+import matplotlib.pyplot as plt
+from pandas_datareader import data as pdr
+
+# Pull from FRED
+start = "2007-01-01"
+cpi = pdr.DataReader("CPIAUCSL", "fred", start)
+earnings = pdr.DataReader("CES0500000003", "fred", start)
+
+# Compute annual percent changes
+cpi['inflation'] = cpi['CPIAUCSL'].pct_change(12) * 100  # annual inflation %
+earnings['earnings_growth'] = earnings['CES0500000003'].pct_change(12) * 100  # annual growth %
+
+# Merge series
+df_q4 = cpi[['inflation']].join(earnings[['earnings_growth']], how='inner')
+
+# Plot both series
+plt.figure(figsize=(10,5))
+plt.plot(df_q4.index, df_q4['inflation'], label="CPI Inflation (%)", color="red")
+plt.plot(df_q4.index, df_q4['earnings_growth'], label="Earnings Growth (%)", color="blue")
+plt.xlabel("Date")
+plt.ylabel("Percent change")
+plt.title("Annual CPI Inflation vs. Annual Earnings Growth")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+```
+
+
+## (b) Correlation between annual inflation and earnings growth
+
+```{python}
+correlation = df_q4['inflation'].corr(df_q4['earnings_growth'])
+print(f"Correlation between annual inflation and earnings growth: {correlation:.2f}")
+```
+
+## (c) 6-month lag of annual earnings growth and correlation with inflation
+
+
+```{python}
+# Compute 6-month lag of annual earnings growth
+df_q4['earnings_growth_lag6'] = df_q4['earnings_growth'].shift(6)
+
+# Correlation with inflation
+lag_correlation = df_q4['inflation'].corr(df_q4['earnings_growth_lag6'])
+print(f"Correlation between inflation and 6-month lag of earnings growth: {lag_correlation:.2f}")
+```
+
+
+ 
+## This correlation tell that:
+past earnings growth (6 months ago)** is linked to **current inflation**.  
+- If **positive**, it suggests wages may be a **leading indicator** of inflation.  
+- If near **zero or negative**, it suggests wages are more coincident/lagging.
+
+
+## My Insight : 
+Shifting earnings growth by 6 months lets us see if past earnings changes help predict current inflation.
+A **positive correlation** suggests that increases in earnings may anticipate higher consumer prices in the near future, hinting at a possible leading relationship between wages and inflation.
+Wages and inflation move together to some extent (about 50% correlation).
+
+Lagging wages by six months doesn’t change the relationship much—correlation stays positive and similar.
+
+Earnings growth doesn’t just follow inflation—it can also line up closely enough to give hints about where inflation is heading. But it’s not a crystal ball.

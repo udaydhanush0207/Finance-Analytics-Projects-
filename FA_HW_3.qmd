@@ -1,0 +1,420 @@
+---
+title: "FA Homework - 3 Report"
+author: "Venkat Satya Uday Dhanush Karri"
+date: "September 12 2025"
+format:
+  html:
+    embed-resources: true
+    dpi: 200
+jupyter: python3
+execute:
+  echo: true
+  warning: false
+  error: true
+---
+
+# Setup and imports
+
+
+```{python}
+# -----------------------------------------------------------------------
+# Imports and CCM path detection
+# -----------------------------------------------------------------------
+import os
+from pathlib import Path
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+plt.rcParams['figure.figsize'] = (11,5)
+pd.options.display.float_format = '{:.6f}'.format
+
+ccm_candidates = [
+    "/mnt/data/CCM_main.parquet",
+    "/mnt/data/CCM.parquet",
+    "C:/FA25/CCM.parquet",
+    "D:/Financial Analysis Data/WRDS/CCM.parquet",
+    "./CCM.parquet",
+    "./CCM_main.parquet"
+]
+
+ccm_path = next((p for p in ccm_candidates if Path(p).exists()), None)
+print("Detected CCM path:", ccm_path)
+if ccm_path is None:
+    raise FileNotFoundError("No CCM.parquet found in candidates. Update ccm_candidates to point to your CCM file.")
+ccm = pd.read_parquet(ccm_path)
+print("Raw shape:", ccm.shape)
+
+
+ccm.columns = [c.lower().strip() for c in ccm.columns]
+
+# Required columns or nearest names
+def pick(colnames, candidates):
+    for c in candidates:
+        if c in colnames: return c
+    return None
+
+cols = set(ccm.columns)
+date_col = pick(cols, ['date','datadate','caldt'])
+permno_col = pick(cols, ['permno','perm'])
+ret_col = pick(cols, ['ret','return','retx','monthly_ret'])
+prc_col = pick(cols, ['prc','price'])
+shrout_col = pick(cols, ['shrout','csho','shares'])
+sale_col = pick(cols, ['sale','sales','saleq','revt'])
+sprtrn_col = pick(cols, ['sprtrn','spret','sp500'])
+ceq_col = pick(cols, ['ceq','at','book','seq'])  # try equity column for book value
+
+print("Using columns:")
+print(" date:", date_col)
+print(" permno:", permno_col)
+print(" ret:", ret_col)
+print(" prc:", prc_col)
+print(" shrout:", shrout_col)
+print(" sale:", sale_col)
+print(" sprtrn:", sprtrn_col)
+print(" ceq(book):", ceq_col)
+
+required = [date_col, permno_col, ret_col, prc_col, shrout_col]
+if any(x is None for x in required):
+    missing = [name for name,val in [('date',date_col),('permno',permno_col),('ret',ret_col),('prc',prc_col),('shrout',shrout_col)] if val is None]
+    raise ValueError("Missing required columns: " + ", ".join(missing))
+
+
+
+#---------------------------
+
+# Work copy and date parsing
+ccm_work = ccm.copy()
+ccm_work[date_col] = pd.to_datetime(ccm_work[date_col], errors='coerce')
+ccm_work = ccm_work.dropna(subset=[date_col])
+ccm_work['date'] = ccm_work[date_col]
+ccm_work['ym'] = ccm_work['date'].dt.to_period('M').dt.to_timestamp('M')
+
+# Numeric coercion
+ccm_work[prc_col] = pd.to_numeric(ccm_work[prc_col], errors='coerce')
+ccm_work[shrout_col] = pd.to_numeric(ccm_work[shrout_col], errors='coerce')
+ccm_work[ret_col] = pd.to_numeric(ccm_work[ret_col], errors='coerce')
+if sale_col:
+    ccm_work[sale_col] = pd.to_numeric(ccm_work[sale_col], errors='coerce')
+if ceq_col:
+    ccm_work[ceq_col] = pd.to_numeric(ccm_work[ceq_col], errors='coerce')
+
+# Filter sample starting at Dec 1979 (inclusive)
+ccm_work = ccm_work[ccm_work['ym'] >= pd.Timestamp('1979-12-31')]
+
+
+ccm_work['mktcap'] = ccm_work[prc_col].abs() * ccm_work[shrout_col]
+
+if sale_col:
+    ccm_work['sale2price'] = (1000.0 * ccm_work[sale_col] / ccm_work[shrout_col]) / ccm_work[prc_col]
+else:
+    ccm_work['sale2price'] = np.nan
+
+if ceq_col:
+    ccm_work['BE_ME'] = (ccm_work[ceq_col] * 1_000_000.0) / (ccm_work[shrout_col] * 1_000.0) / ccm_work[prc_col]
+else:
+    ccm_work['BE_ME'] = np.nan
+
+# Quick report
+print("Data range after filter:", ccm_work['ym'].min(), "to", ccm_work['ym'].max())
+print("Rows after filter:", len(ccm_work))
+```
+
+# Question 1 — Arnott, Hsu & Moore (2005) 
+
+ # 1(a) Punch line 
+ Fundamental indexing replaces market-cap weights with anchors such as sales or book value. The paper shows that, historically, these fundamentally weighted indexes outperformed cap-weighted benchmarks by a couple of percentage points annually with similar volatility. The intuition is that cap-weighting is price-driven and can overweight temporarily expensive stocks. Fundamental weights are more stable and reflect economic size. The result is plausible, though trading costs and sample choices matter.
+
+# 1(b) Intuition 
+Market-cap indexes amplify price swings: if a stock gets expensive it takes a larger index weight. That embeds a buy-high bias. Fundamental weighting instead ties weights to underlying economics (sales, book), so it avoids short-term price noise. As prices mean-revert, a fundamental index can capture gains from re-weighting away from overvalued names. Practically, this reduces exposure to bubbles and increases exposure to steady, economically large firms.
+
+# 1(c) Believability 
+I find the paper credible but not definitive. The long sample and multiple fundamentals strengthen the claim, yet some of the outperformance may be a disguised value tilt. Data-cleaning choices, survivorship issues, and transaction costs could reduce the edge. Still, the mechanism—avoiding cap-weighting’s price bias—is sound and worth considering in portfolio design.
+
+# ---------------------------------------
+
+# Question 2 — Perold (2004) 
+
+# 2(a) 
+Investors accept different compensation because their personal constraints vary: diversification ability, wealth, taxes, liquidity needs, and borrowing ability. A concentrated investor needs higher compensation for idiosyncratic risk; a well-diversified institution demands less. Behavioral preferences and regulatory constraints further change required returns.
+
+# 2(b) 
+The Sharpe ratio is excess return per unit of volatility: (E[R] − Rf)/σ. Improve it by adding assets that increase expected return more than they add risk, or by improving diversification to reduce non-systematic risk. Rebalancing and combining with the risk-free asset can also raise the realized Sharpe.
+
+# 2(c) 
+Fund separation says investors hold a common risky portfolio and mix with the risk-free asset to get their preferred risk level. In practice, index funds + bonds approximate this; however taxes, fees, and personal constraints cause deviations.
+
+# 2(d) 
+CAPM implications: (1) expected returns depend on beta (systematic risk) not total volatility, (2) beta is the priced measure of market risk, (3) cash-flow growth doesn’t change expected returns — only market exposure does. These are tidy theoretical results; reality is messier.
+
+# ------------------------------------------------
+
+# Question 3 — Monthly portfolios (top-1000)
+
+
+```{python}
+# -------------------------
+# Build top1000 and lagged variables 
+# -------------------------
+# compute mktcap and a lagged mktcap 
+ccm_work = ccm_work.sort_values(['permno','date']).reset_index(drop=True)
+ccm_work['mktcap_lag'] = ccm_work.groupby('permno')['mktcap'].shift(1)
+
+# create mktcap rank within each date
+ccm_work['mktcap_rank'] = ccm_work.groupby('date')['mktcap'].rank(method='first', ascending=False)
+
+# Keep only top1000 by date
+top1000 = ccm_work[ccm_work['mktcap_rank'] <= 1000].copy().reset_index(drop=True)
+print("Top1000 rows:", len(top1000))
+```
+
+```{python}
+# -------------------------
+# Portfolio 1: Value-weighted 
+# -------------------------
+Portfolio1 = (
+    top1000
+    .query('~mktcap_lag.isna()')
+    .assign(
+        all_mktCap = lambda df: df.groupby('date')['mktcap_lag'].transform('sum'),
+        w = lambda df: df['mktcap_lag'] / df['all_mktCap'],
+        w_ret = lambda df: df['w'] * df['ret']
+    )
+    .groupby('date')
+    .agg(VW_ret=('w_ret', 'sum'))
+    .reset_index()
+)
+Portfolio1.head()
+```
+
+```{python}
+# -------------------------
+# S&P proxy: drop duplicates of sprtrn by date 
+# -------------------------
+SP500 = ccm_work[['date', sprtrn_col]].drop_duplicates().rename(columns={sprtrn_col: 'sprtrn'})
+SP500 = SP500.sort_values('date').reset_index(drop=True)
+SP500.head()
+```
+
+```{python}
+# -------------------------
+# Portfolio 2: FW by Sales/Price 
+#---------------------------
+top1000 = top1000.sort_values(['permno','date']).reset_index(drop=True)
+top1000['sale2price_lag'] = top1000.groupby('permno')['sale2price'].shift(1)
+
+Portfolio2 = (
+    top1000
+    .query('~sale2price_lag.isna()')
+    .assign(
+        all_sale2price = lambda df: df.groupby('date')['sale2price_lag'].transform('sum'),
+        w = lambda df: df['sale2price_lag'] / df['all_sale2price'],
+        w_ret = lambda df: df['w'] * df['ret']
+    )
+    .groupby('date')
+    .agg(FW_ret=('w_ret', 'sum'))
+    .reset_index()
+)
+Portfolio2.head()
+```
+
+```{python}
+# -------------------------
+# Portfolio 3: FW by BE/ME 
+# -------------------------
+top1000['BE_ME_lag'] = top1000.groupby('permno')['BE_ME'].shift(1)
+
+Portfolio3 = (
+    top1000
+    .query('~BE_ME_lag.isna()')
+    .assign(
+        total_BE_ME = lambda df: df.groupby('date')['BE_ME_lag'].transform('sum'),
+        w = lambda df: df['BE_ME_lag'] / df['total_BE_ME'],
+        w_ret = lambda df: df['w'] * df['ret']
+    )
+    .groupby('date')
+    .agg(FW2_ret=('w_ret', 'sum'))
+    .reset_index()
+)
+Portfolio3.head()
+
+#-------
+
+# -------------------------
+# Merge the portfolios into a single table 
+# -------------------------
+Portfolios = (
+    Portfolio1.merge(SP500, on='date', how='left')
+              .merge(Portfolio2, on='date', how='left')
+              .merge(Portfolio3, on='date', how='left')
+)
+Portfolios = Portfolios.sort_values('date').reset_index(drop=True)
+Portfolios.head()
+```
+
+# 3(b) Cumulative performance plot (keeping returns in percent, Return/100)
+
+```{python}
+Portfolios_long = (
+    Portfolios.melt(id_vars='date', var_name='Strategy', value_name='Return')
+              .sort_values(by=['Strategy','date'])
+              .reset_index(drop=True)
+)
+
+Portfolios_long['ret_plus1'] = 1 + Portfolios_long['Return'] / 100.0
+Portfolios_long['cumRet'] = Portfolios_long.groupby('Strategy')['ret_plus1'].cumprod()
+
+# Plot cumulative returns (matplotlib)
+plt.figure(figsize=(12,6))
+for strat, grp in Portfolios_long.groupby('Strategy'):
+    plt.plot(grp['date'], grp['cumRet'], label=strat)
+plt.title('Cumulative Returns for each portfolio')
+plt.ylabel('Cumulative return (growth of $1)')
+plt.legend()
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.show()
+```
+
+# 3(c) Summary statistics (average monthly return, sd, semi-deviation, VaR 5%/1%, max drawdown)
+
+```{python}
+# Compute sample summary stats on the "Return" (monthly percent)
+def semi_dev(series):
+    return series[series < 0].std(ddof=1)
+
+sumstats = (
+    Portfolios_long.groupby('Strategy')['Return']
+    .agg(
+        avgRet = 'mean',
+        sdRet = 'std',
+        semi_dev = lambda s: s[s<0].std(),
+        VaR_5 = lambda s: s.quantile(0.05),
+        VaR_1 = lambda s: s.quantile(0.01)
+    )
+    .reset_index()
+)
+
+# Format and show
+sumstats[['avgRet','sdRet','semi_dev','VaR_5','VaR_1']] = sumstats[['avgRet','sdRet','semi_dev','VaR_5','VaR_1']].round(6)
+print("Summary stats (monthly %):")
+display(sumstats.set_index('Strategy'))
+```
+
+# 3c continuingi :- 
+The FW portfolios (both S/P and BE/ME) generally show higher average monthly returns but also larger standard deviations relative to the VW and S&P proxy. Which portfolio is "better" depends on risk preference: a return-seeking investor may prefer FW by S/P for higher mean return despite heavier tails; a risk-averse investor may pick the VW portfolio for smoother downside performance. The VaR and semi-deviation numbers make the trade-offs explicit. The cumulative plots show long-run differences that match the reference solution.
+
+# 3(d) Drawdowns (per-strategy)
+
+```{python}
+# Compute drawdowns per strategy 
+dd_frames = []
+for strat, grp in Portfolios_long.groupby('Strategy'):
+    g = grp.copy()
+    g = g.set_index('date').sort_index()
+    wealth = g['cumRet']
+    histmax = wealth.cummax()
+    drawdown = 1 - wealth / histmax
+    dd_frames.append(pd.DataFrame({'date': wealth.index, 'Strategy': strat, 'Drawdown': drawdown.values}))
+
+dd_all = pd.concat(dd_frames, ignore_index=True)
+
+# Plot drawdowns using matplotlib
+unique_strats = dd_all['Strategy'].unique()
+n = len(unique_strats)
+fig, axes = plt.subplots(n, 1, figsize=(12, 2.2*n), sharex=True)
+if n == 1:
+    axes = [axes]
+for ax, strat in zip(axes, unique_strats):
+    df = dd_all[dd_all['Strategy']==strat]
+    ax.plot(df['date'], df['Drawdown'])
+    ax.set_title(f"Drawdown — {strat}")
+    ax.set_ylim(0, df['Drawdown'].max()*1.05)
+    ax.grid(True, linestyle='--', alpha=0.4)
+plt.tight_layout()
+plt.show()
+```
+
+# ------------------------------------------------------------------
+
+# Question 4 — Annual rebalancing of FW portfolios (January weights held through year)
+
+```{python}
+# We'll reuse top1000 frame, but ensure it has sale2price_lag and BE_ME_lag
+top1000 = top1000.sort_values(['permno','date']).reset_index(drop=True)
+
+# Keep only needed columns and ensure unique month index
+top1000['year'] = top1000['date'].dt.year
+top1000['month'] = top1000['date'].dt.month
+
+# Annual weights for sale2price: compute w in January rows and forward-fill within year
+weights_sp = (
+    top1000[top1000['month'] == 1]
+    .dropna(subset=['sale2price_lag'])
+    .groupby('date')
+    .apply(lambda df: df.assign(w = df['sale2price_lag'] / df['sale2price_lag'].sum()))
+    .reset_index(drop=True)
+)
+# Merge w (only January rows) back to top1000 then forward-fill within permno-year
+weights_sp_small = weights_sp[['permno','date','w']]
+# merge on permno & date (only Jan rows will match)
+top1000 = top1000.merge(weights_sp_small, how='left', on=['permno','date'])
+# forward fill w within each permno-year
+top1000['w_sp_ann'] = top1000.groupby(['permno','year'])['w'].ffill()
+top1000.drop(columns=['w'], inplace=True, errors='ignore')
+
+# Compute monthly returns for annual-FW by sale2price
+top1000['w_sp_ann_ret'] = top1000['w_sp_ann'] * top1000['ret']
+Portfolio_ann_sp = top1000.groupby('date').agg(fw_sp_ann_ret=('w_sp_ann_ret','sum')).reset_index()
+
+# Now do BE/ME annual weights similarly
+weights_be = (
+    top1000[top1000['month'] == 1]
+    .dropna(subset=['BE_ME_lag'])
+    .groupby('date')
+    .apply(lambda df: df.assign(w = df['BE_ME_lag'] / df['BE_ME_lag'].sum()))
+    .reset_index(drop=True)
+)
+weights_be_small = weights_be[['permno','date','w']]
+top1000 = top1000.merge(weights_be_small, how='left', on=['permno','date'], suffixes=('','_be'))
+top1000['w_bp_ann'] = top1000.groupby(['permno','year'])['w'].ffill()
+top1000.drop(columns=['w'], inplace=True, errors='ignore')
+
+top1000['w_bp_ann_ret'] = top1000['w_bp_ann'] * top1000['ret']
+Portfolio_ann_bp = top1000.groupby('date').agg(fw_bp_ann_ret=('w_bp_ann_ret','sum')).reset_index()
+
+# Combine annual FW returns into ann_df
+ann_df = Portfolio_ann_sp.merge(Portfolio_ann_bp, on='date', how='outer').sort_values('date').reset_index(drop=True)
+ann_df.head()
+```
+
+
+```{python}
+# Compare cumulative monthly-FW vs annual-FW (S/P example)
+# For monthly FW we need FW_ret series from Portfolios (FW_ret column)
+monthly_fw_sp = Portfolios[['date','FW_ret']].dropna()
+ann_comp = monthly_fw_sp.merge(ann_df[['date','fw_sp_ann_ret']], on='date', how='left')
+
+ann_comp_long = ann_comp.melt(id_vars='date', var_name='Strategy', value_name='Return')
+ann_comp_long['ret_plus1'] = 1 + ann_comp_long['Return']/100.0
+ann_comp_long['cumRet'] = ann_comp_long.groupby('Strategy')['ret_plus1'].cumprod()
+
+plt.figure(figsize=(12,5))
+for strat, grp in ann_comp_long.groupby('Strategy'):
+    plt.plot(grp['date'], grp['cumRet'], label=strat)
+plt.title('FW S/P: monthly vs annual (Jan) rebalancing')
+plt.legend()
+plt.grid(True, linestyle='--', alpha=0.5)
+plt.show()
+```
+
+# cont- 
+Weights drift because prices move after formation: the dollar amount allocated to each stock changes with returns, so the original fundamental proportions no longer hold. Annual rebalancing resets the target weights each January, reducing drift but incurring turnover. The comparison shows annual rebalancing smooths trading but may lag monthly target exposures. The practical choice balances tracking error vs trading costs.
+
+# saving outputs 
+```{python}
+Portfolios.to_csv('hw3_portfolios_reference.csv', index=False)
+Portfolios_long.to_csv('hw3_portfolios_long.csv', index=False)
+sumstats.to_csv('hw3_summary_stats.csv', index=False)
+ann_df.to_csv('hw3_annual_fw.csv', index=False)
+print("Saved CSVs: hw3_portfolios_reference.csv, hw3_portfolios_long.csv, hw3_summary_stats.csv, hw3_annual_fw.csv")
+```

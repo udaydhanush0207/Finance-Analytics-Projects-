@@ -1,0 +1,231 @@
+---
+title: "FA Homework - 4 Report"
+author: "Venkat Satya Uday Dhanush Karri"
+date: "September 19 2025"
+format:
+  html:
+    embed-resources: true
+    dpi: 200
+jupyter: python3
+execute:
+  echo: true
+  warning: false
+  error: true
+---
+
+# Setup and Imports 
+
+```{python}
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# --- Load data ---
+ccm_path = r"C:\FA25\CCM_main.parquet"
+sp500_path = r"C:\FA25\sp500list.parquet"
+
+ccm = pd.read_parquet(ccm_path)
+sp500 = pd.read_parquet(sp500_path)
+
+print("sp500 rows:", sp500.shape)
+print("ccm rows:", ccm.shape)
+```
+
+# Q1 (a) What is the theory of popularity?
+The theory of popularity says price and expected returns depend not only on fundamentals and risk but also on how popular an asset is. Popularity here means ease of ownership (liquidity), index inclusion, visibility, and investor flows — assets that are widely held, easy to trade, and hyped tend to trade at higher prices and therefore have lower expected returns than less-popular, harder-to-hold assets. I agree in large part: popularity helps explain persistent return differences within an asset class (e.g., among stocks) because it affects demand, liquidity premia, and who ends up owning the asset.
+
+# Q1 (b) What does the quoted sentence mean?
+Answer: It means cross-asset return differences (stocks vs bonds) are largely explained by risk; but within an asset class (e.g., within equities) returns vary for reasons other than risk — such as popularity, liquidity, index inclusion, and investor behavior.
+
+# Q1 (c) Which popularity measures matter now?
+Answer: Important measures today include ETF/ETF flows, AUM, turnover/liquidity, index inclusion (S&P/FTSE), retail attention (Google trends/social), and short interest; I would prioritize ETF ownership and flows plus liquidity as the most impactful.
+
+# ----------------------------------------------------------------------------
+
+# Q2 (a) What is GICS?
+GICS (Global Industry Classification Standard) is a hierarchical industry taxonomy created by MSCI and S&P. It splits publicly traded firms into 11 sectors, which break into industry groups, industries, and sub-industries. The classification standard gives a consistent way to compare companies across time and indexes (e.g., IT vs Financials), and it’s widely used for sector weights, performance attribution, and index construction.
+
+```{python}
+# Q2. IT concentration in S&P500
+
+# --- expand sp500 membership monthly ---
+sp500_expanded = []
+for _, row in sp500.iterrows():
+    start = pd.to_datetime(row['startdt'])
+    end = pd.to_datetime(row['enddt'])
+    months = pd.period_range(start.to_period('M'), end.to_period('M'), freq='M')
+    for m in months:
+        sp500_expanded.append({'permno': row['permno'], 'ym': m.to_timestamp()})
+sp500m = pd.DataFrame(sp500_expanded)
+print("Expanded S&P500 monthly rows:", len(sp500m))
+
+# --- make CCM monthly ---
+ccm['ym'] = ccm['date'].dt.to_period('M').dt.to_timestamp()
+
+# --- merge ---
+df2 = sp500m.merge(ccm, on=['permno','ym'], how='left')
+
+# --- marketcap ---
+df2['marketcap'] = df2['prc'].abs() * df2['shrout']
+
+# --- IT flag ---
+df2['Industry'] = df2['Industry'].astype(str).str.strip()
+df2['is_IT'] = (df2['Industry'] == 'IT') | (df2['gsector'].fillna(0).round().astype(int) == 45)
+
+print("Total rows after merge:", len(df2))
+print("IT rows:", df2['is_IT'].sum())
+
+# (b) Number of IT members
+it_counts = df2[df2['is_IT']].groupby('ym').permno.nunique()
+it_counts.plot(title='Number of IT Members in S&P500', figsize=(8,4))
+plt.show()
+
+# (c) IT weight
+weights = df2.groupby(['ym','is_IT'])['marketcap'].sum().unstack(fill_value=0)
+if True not in weights.columns:
+    weights[True] = 0
+weights['it_weight'] = weights[True] / weights.sum(axis=1)
+weights['it_weight'].plot(title='Weight of IT in S&P500', figsize=(8,4))
+plt.show()
+
+# (d) IT contribution to returns
+df2['wgt'] = df2['marketcap'] / df2.groupby('ym')['marketcap'].transform('sum')
+df2['contrib'] = df2['wgt'] * df2['ret']
+it_contrib = df2.groupby(['ym','is_IT'])['contrib'].sum().unstack(fill_value=0)
+if True not in it_contrib.columns:
+    it_contrib[True] = 0
+it_contrib[True].plot(title='IT Contribution to S&P500 Returns', figsize=(8,4))
+plt.show()
+```
+
+# ------------------------------------------------------------------------------
+
+```{python}
+# 3. Top-1000 portfolios
+ccm2 = ccm.copy()
+ccm2['ym'] = ccm2['date'].dt.to_period('M').dt.to_timestamp()
+
+# Marketcap
+if 'marketcap' not in ccm2.columns:
+    ccm2['marketcap'] = ccm2['prc'].abs() * ccm2['shrout']
+
+# Returns
+ccm2['ret'] = pd.to_numeric(ccm2['ret'], errors='coerce')
+if ccm2['ret'].abs().max() > 1.5:
+    ccm2['ret'] = ccm2['ret'] / 100
+if 'sprtrn' in ccm2.columns and ccm2['sprtrn'].abs().max() > 1.5:
+    ccm2['sprtrn'] = ccm2['sprtrn'] / 100
+
+# Top 1000
+ccm2['rank'] = ccm2.groupby('ym')['marketcap'].rank(method='first', ascending=False)
+ccm_top = ccm2[ccm2['rank'] <= 1000].copy()
+
+# VW
+vw = ccm_top.groupby('ym').apply(lambda g: (g['marketcap']/g['marketcap'].sum()*g['ret']).sum()).rename('VW')
+
+# SP500
+if 'sprtrn' in ccm_top.columns:
+    sp500_index = ccm_top.groupby('ym')['sprtrn'].mean().rename('SP500')
+else:
+    sp500_index = pd.Series(index=vw.index, data=np.nan, name='SP500')
+
+# FW (using ceq)
+fw_returns = []
+ccm_top['year'] = ccm_top['ym'].dt.year
+for year, grp in ccm_top.groupby('year'):
+    jan = grp[grp['ym'] == pd.Timestamp(year=year, month=1, day=1)]
+    if jan.empty: continue
+    jan_fund = jan.set_index('permno')['ceq'].dropna()
+    if jan_fund.sum() == 0: continue
+    jan_weights = jan_fund / jan_fund.sum()
+    for m in sorted(grp['ym'].unique()):
+        mdf = grp[grp['ym'] == m].set_index('permno')
+        aligned = mdf.join(jan_weights.rename('fw_w'))
+        aligned['fw_w'] = aligned['fw_w'].fillna(0)
+        fw_ret = (aligned['fw_w'] * aligned['ret']).sum()
+        fw_returns.append({'date': m, 'FW': fw_ret})
+fw = pd.DataFrame(fw_returns).set_index('date').sort_index()
+
+# Combine
+ports = pd.concat([vw, sp500_index, fw['FW']], axis=1).dropna(how='all')
+
+# Summary
+summary = ports.agg(['mean','std']).transpose()
+summary['ann_mean'] = (1 + summary['mean'])**12 - 1
+print(summary)
+
+# Plot monthly and cumulative returns
+plt.figure(figsize=(10,4))
+ports[['VW','SP500','FW']].iloc[:240].plot(title='Monthly returns (first 240 months)')
+plt.show()
+
+cum = (1 + ports.fillna(0)).cumprod() - 1
+cum[['VW','SP500','FW']].plot(title='Cumulative gross returns', figsize=(10,4))
+plt.show()
+```
+
+```{python}
+# Q4. CAPM α and β
+import statsmodels.api as sm
+from statsmodels.regression.rolling import RollingOLS
+import seaborn as sns   # <--- FIX: import seaborn here
+import matplotlib.pyplot as plt
+
+ccm_cap = ccm2.copy()
+ccm_cap['marketcap'] = pd.to_numeric(ccm_cap['marketcap'], errors='coerce')
+ccm_cap = ccm_cap[ccm_cap['date'] >= '1990-01-01']
+
+# Top-200 by lagged marketcap each Jan
+years = sorted(ccm_cap['date'].dt.year.unique())
+permnos_top = []
+for y in years:
+    prev_dec = pd.Timestamp(year=y-1, month=12, day=1)
+    snap = ccm_cap[ccm_cap['date'].dt.to_period('M').dt.to_timestamp() == prev_dec]
+    if snap.empty: continue
+    top200 = snap.sort_values('marketcap', ascending=False).head(200)['permno'].unique()
+    permnos_top.extend(list(top200))
+permnos_top = list(set(permnos_top))
+ccm_cap2 = ccm_cap[ccm_cap['permno'].isin(permnos_top)].copy()
+
+# Market return
+ccm_cap2['mkt_ret'] = pd.to_numeric(ccm_cap2['sprtrn'], errors='coerce')
+
+# Rolling regressions
+results = []
+for pid, g in ccm_cap2.groupby('permno'):
+    g = g.sort_values('date').set_index('date')
+    if len(g) < 60: continue
+    y = g['ret']
+    X = sm.add_constant(g['mkt_ret'])
+    try:
+        rols = RollingOLS(y, X, window=60, min_nobs=36)
+        rres = rols.fit()
+        df = rres.params.copy()
+        df['permno'] = pid
+        df['ym'] = df.index
+        results.append(df)
+    except Exception:
+        continue
+
+capm_res = pd.concat(results)
+betas = capm_res['mkt_ret']
+alphas = capm_res['const']
+
+print("Beta mean, std:", betas.mean(), betas.std())
+print("Negative betas:", (betas < 0).sum())
+print("Alpha mean, std:", alphas.mean(), alphas.std())
+print("Positive alphas:", (alphas > 0).sum(), "Negative alphas:", (alphas < 0).sum())
+
+# Extra plots
+sns.histplot(betas.dropna(), bins=50, kde=True)
+plt.title('Distribution of rolling betas')
+plt.show()
+
+median_beta = capm_res.groupby('ym')['mkt_ret'].median()
+median_beta.plot(title='Median beta over time', figsize=(10,3.5))
+plt.show()
+
+mean_alpha = capm_res.groupby('ym')['const'].mean()
+mean_alpha.plot(title='Average alpha over time', figsize=(10,3.5))
+plt.show()
+```
